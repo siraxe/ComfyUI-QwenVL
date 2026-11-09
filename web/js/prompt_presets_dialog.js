@@ -1,11 +1,11 @@
 import { app } from "/scripts/app.js";
 
-// "Edit prompt presets" button + editor dialog for the QwenVL GGUF nodes.
+// "Edit prompt presets" button + editor dialog for all QwenVL nodes (HF + GGUF).
 // The button is a plain button widget appended after the other widgets, so
 // the frontend handles its placement and clicks. Presets are stored server-side via
 // the /qwenvl/prompt_presets routes registered by py/AILab_QwenVL_Presets.py.
 
-const TARGET_CLASSES = new Set(["AILab_QwenVL_GGUF", "AILab_QwenVL_GGUF_Advanced"]);
+const TARGET_CLASSES = new Set(["AILab_QwenVL", "AILab_QwenVL_Advanced", "AILab_QwenVL_GGUF", "AILab_QwenVL_GGUF_Advanced"]);
 const BTN_LABEL = "✏ Edit preset prompts";
 const BTN_NAME = "Edit preset prompts";
 

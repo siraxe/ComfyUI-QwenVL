@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 __repo_name__ = "ComfyUI-QwenVL"
-__version__ = "2.3.2"
+__version__ = "2.4.0"
 
 # Locate current and node directories
 current_dir = Path(__file__).parent

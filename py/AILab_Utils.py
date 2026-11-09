@@ -285,6 +285,53 @@ def load_ltx_prompts() -> dict:
     return {}
 
 
+def normalize_input_path(value) -> Path | None:
+    """Turn a user-provided path string into an absolute Path (or None)."""
+    if value is None:
+        return None
+    raw = str(value).strip().strip('"').strip("'")
+    if not raw:
+        return None
+
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path
+
+    # Relative paths are resolved against CWD first, then models/.
+    candidates = [Path.cwd() / path]
+    models_dir = getattr(folder_paths, "models_dir", None)
+    if models_dir:
+        candidates.append(Path(models_dir) / path)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve()
+
+
+def parse_model_path_payload(value) -> tuple[Path | None, Path | None, float]:
+    """Accept either a plain path or the dict emitted by the QwenVL Path Loader.
+
+    Returns ``(model_path, lora_path, lora_scale)``. When the loader emitted
+    ``override_model=False``, the payload is ignored so the consuming node falls
+    back to its own ``model_name`` dropdown (and any LoRA attached to the loader
+    is NOT applied to that default model).
+    """
+    if value is None:
+        return None, None, 1.0
+    if isinstance(value, dict):
+        if not bool(value.get("override_model", True)):
+            return None, None, 1.0
+        model_value = value.get("model_path") or value.get("path")
+        use_lora = bool(value.get("use_lora", True))
+        lora_value = value.get("lora_path") if use_lora else None
+        try:
+            lora_scale = float(value.get("lora_scale", 1.0))
+        except (TypeError, ValueError):
+            lora_scale = 1.0
+        return normalize_input_path(model_value), normalize_input_path(lora_value), lora_scale
+    return normalize_input_path(value), None, 1.0
+
+
 def parse_gguf_repos(repos: dict, flattened: dict, seen_display_names: set, overwrite_existing: bool = False):
     """Parse dictionary of GGUF repos into flattened display dictionary."""
     if not isinstance(repos, dict):

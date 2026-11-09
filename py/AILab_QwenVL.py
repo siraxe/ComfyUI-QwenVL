@@ -13,7 +13,9 @@
 #
 # Source: https://github.com/1038lab/ComfyUI-QwenVL
 
+import base64
 import gc
+import io
 import json
 import os
 import platform
@@ -51,10 +53,28 @@ from AILab_Utils import (
     HF_CONFIG_PATH,
     SYSTEM_PROMPTS_PATH,
     load_system_prompts,
+    parse_model_path_payload,
     tensor_to_pil,
+    tensor_to_base64_png,
     sample_video_frames,
     resolve_safe_video_max_side,
     resolve_hf_model_path,
+)
+from AILab_QwenVL_PromptKit import (
+    FL2VA_MIN_MAX_TOKENS,
+    FL2VA_PRESET,
+    REF2VA_MAX_IMAGES,
+    REF2VA_MIN_MAX_TOKENS,
+    REF2VA_PRESET,
+    build_fl2va_request,
+    build_ref2va_request,
+    get_duration_input,
+    iter_batch_frames,
+    load_fl2va_system_prompt,
+    load_ref2va_system_prompt,
+    resolve_preset_text,
+    select_fl2va_frames,
+    unified_preset_prompts,
 )
 
 NODE_DIR = PLUGIN_DIR
@@ -82,6 +102,8 @@ TOOLTIPS = {
     "repetition_penalty": "Values >1 (e.g., 1.1–1.3) penalize repeated phrases; 1.0 leaves logits untouched.",
     "frame_count": "Number of frames extracted from video inputs before prompting Qwen-VL. More frames provide context but cost time.",
     "video_frame_size": "Control the maximum resolution for video frames. 'auto' computes safe budget to prevent OOM/overflow while keeping small videos untouched.",
+    "model_path": "Connect MODEL_PATH from the QwenVL Path Loader to run a local model folder (.safetensors snapshot with config.json) instead of the model_name dropdown. Overrides model_name unless the loader's override_model is False. A LoRA attached to the loader is applied via PEFT.",
+    "duration": "Target video duration in seconds. Used by the 'Prompt Enhance FL2VA' / 'Prompt Enhance Ref2VA' presets to plan shot timing; ignored by other presets.",
 }
 
 class Quantization(str, Enum):
@@ -574,6 +596,70 @@ class QwenVLBase:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
+    @staticmethod
+    def _resolve_hf_model_source(custom_model):
+        """Resolve a Path Loader model entry to a loadable transformers source.
+
+        Accepts a snapshot folder (with config.json) or a .safetensors file
+        whose sibling folder contains config.json + tokenizer files.
+        """
+        if custom_model.is_dir():
+            if not (custom_model / "config.json").is_file():
+                raise FileNotFoundError(
+                    f"[QwenVL] Model folder has no config.json: {custom_model}"
+                )
+            return str(custom_model)
+        if custom_model.suffix.lower() == ".safetensors":
+            parent = custom_model.parent
+            if (parent / "config.json").is_file():
+                print(f"[QwenVL] Loading transformers model from folder: {parent}")
+                return str(parent)
+            raise FileNotFoundError(
+                f"[QwenVL] '{custom_model.name}' has no config.json next to it; a full "
+                "model folder (config.json + tokenizer) is required to load it with transformers."
+            )
+        raise ValueError(
+            f"[QwenVL] Unsupported model file for the transformers nodes: {custom_model}. "
+            "Use a model folder or .safetensors snapshot; GGUF files belong to the GGUF nodes."
+        )
+
+    @staticmethod
+    def _apply_hf_lora(model, lora_file, lora_scale):
+        """Attach a PEFT LoRA adapter to the loaded transformers model."""
+        if model is None or lora_file is None:
+            return model
+        if lora_file.suffix.lower() == ".gguf":
+            print(
+                "[QwenVL] GGUF LoRA adapters cannot be applied to transformers models; "
+                "skipping LoRA (connect this model to a GGUF node to use it)."
+            )
+            return model
+        try:
+            from peft import PeftModel
+        except ImportError:
+            print("[QwenVL] peft is not installed; skipping LoRA (pip install peft).")
+            return model
+
+        adapter_dir = lora_file if lora_file.is_dir() else lora_file.parent
+        if not (adapter_dir / "adapter_config.json").is_file():
+            print(
+                f"[QwenVL] No adapter_config.json found next to {lora_file.name}; "
+                "transformers LoRA loading requires it. Skipping LoRA."
+            )
+            return model
+        try:
+            model = PeftModel.from_pretrained(model, str(adapter_dir), is_trainable=False)
+            model.eval()
+            if abs(float(lora_scale) - 1.0) > 1e-3:
+                print(
+                    "[QwenVL] Note: PEFT scales the adapter with the alpha/rank values in "
+                    f"adapter_config.json; the loader strength {float(lora_scale):g} is not applied."
+                )
+            print(f"[QwenVL] LoRA adapter applied: {lora_file.name}")
+        except Exception as exc:
+            print(f"[QwenVL] LoRA application failed: {exc}")
+        return model
+
     def load_model(
         self,
         model_name,
@@ -582,43 +668,59 @@ class QwenVLBase:
         use_compile,
         device_choice,
         keep_model_loaded,
+        model_path=None,
     ):
         quant = enforce_memory(model_name, Quantization.from_value(quant_value), self.device_info)
-        
+
+        # Optional Path Loader payload: local model folder/file + optional LoRA.
+        custom_model, lora_file, lora_scale = parse_model_path_payload(model_path)
+
         # Check if BitsAndBytes quantization is being used
         is_bnb_quantization = quant in [Quantization.Q4, Quantization.Q8]
-        
+
         # Check if this is a pre-quantized FP8 model
         is_prequantized_fp8 = is_fp8_model(model_name) or HF_ALL_MODELS.get(model_name, {}).get("quantized", False)
-        
+
         # Determine if we need to force SDPA (for FP8 or BitsAndBytes models)
         force_sdpa = is_prequantized_fp8 or is_bnb_quantization
-        
+
         # Resolve attention mode with force_sdpa flag
         attn_impl = resolve_attention_mode(attention_mode, force_sdpa=force_sdpa)
-        
+
         # Additional info messages for forced SDPA
         if force_sdpa and attention_mode in ["auto", "sage", "flash_attention_2"]:
             if is_prequantized_fp8:
                 print("[QwenVL] FP8 model detected - forcing SDPA attention")
             elif is_bnb_quantization:
                 print("[QwenVL] BitsAndBytes quantization detected - forcing SDPA attention")
-        
+
         print(f"[QwenVL] Attention backend selected: {attn_impl}")
-        
+
         device_requested = self.device_info["recommended_device"] if device_choice == "auto" else device_choice
         device = normalize_device_choice(device_requested)
-        signature = (model_name, quant.value, attn_impl, device, use_compile)
-        
+        signature = (
+            model_name,
+            quant.value,
+            attn_impl,
+            device,
+            use_compile,
+            str(custom_model) if custom_model else "",
+            str(lora_file) if lora_file else "",
+            round(lora_scale, 4),
+        )
+
         # Check if we need to reload (model, quantization, or attention changed)
         if keep_model_loaded and self.model is not None and self.current_signature == signature:
             return
-        
+
         # Clear model and VRAM before loading new configuration
         if self.model is not None:
             print("[QwenVL] Clearing previous model from memory before loading new configuration...")
         self.clear()
-        model_path = ensure_model(model_name)
+        if custom_model is not None:
+            model_path_str = self._resolve_hf_model_source(custom_model)
+        else:
+            model_path_str = ensure_model(model_name)
         quant_config, dtype, _ = quantization_config(model_name, quant)
         
         # Handle attention mode for loading
@@ -659,7 +761,7 @@ class QwenVLBase:
             print(f"[QwenVL] Loading FP8 model to {target_device}...")
             
             # Load model on CPU first (without device_map to avoid meta tensors)
-            self.model = AutoModelForVision2Seq.from_pretrained(model_path, **load_kwargs)
+            self.model = AutoModelForVision2Seq.from_pretrained(model_path_str, **load_kwargs)
             
             # Check if model has meta tensors and materialize them
             has_meta = any(param.device.type == "meta" for param in self.model.parameters())
@@ -669,31 +771,31 @@ class QwenVLBase:
                 self.model = self.model.to_empty(device="cpu")
                 # Now load the state dict properly using HuggingFace's built-in method
                 # This handles both single-file and sharded checkpoints correctly
-                print(f"[QwenVL] Loading weights from {model_path}")
+                print(f"[QwenVL] Loading weights from {model_path_str}")
                 try:
                     # Use HuggingFace's official sharded checkpoint loading
                     from transformers.modeling_utils import load_sharded_checkpoint
                     
-                    print(f"[QwenVL] Loading weights from {model_path}")
+                    print(f"[QwenVL] Loading weights from {model_path_str}")
                     
                     # Check if this is a sharded checkpoint
-                    index_file = os.path.join(model_path, "model.safetensors.index.json")
+                    index_file = os.path.join(model_path_str, "model.safetensors.index.json")
                     if os.path.exists(index_file):
                         # Sharded checkpoint - use HF's official loading function
                         print("[QwenVL] Detected sharded checkpoint, using HF load_sharded_checkpoint...")
-                        load_sharded_checkpoint(self.model, model_path, strict=True)
+                        load_sharded_checkpoint(self.model, model_path_str, strict=True)
                         print("[QwenVL] All shards loaded successfully")
                     else:
                         # Single-file checkpoint - use HF's standard loading
                         from transformers.modeling_utils import load_state_dict
                         from transformers.utils import SAFE_WEIGHTS_NAME, WEIGHTS_NAME
                         
-                        if os.path.exists(os.path.join(model_path, SAFE_WEIGHTS_NAME)):
-                            state_dict_path = os.path.join(model_path, SAFE_WEIGHTS_NAME)
-                        elif os.path.exists(os.path.join(model_path, WEIGHTS_NAME)):
+                        if os.path.exists(os.path.join(model_path_str, SAFE_WEIGHTS_NAME)):
+                            state_dict_path = os.path.join(model_path_str, SAFE_WEIGHTS_NAME)
+                        elif os.path.exists(os.path.join(model_path_str, WEIGHTS_NAME)):
                             state_dict_path = os.path.join(model_path, WEIGHTS_NAME)
                         else:
-                            raise RuntimeError(f"Could not find model weights in {model_path}")
+                            raise RuntimeError(f"Could not find model weights in {model_path_str}")
                         
                         print(f"[QwenVL] Loading weights from {state_dict_path}")
                         state_dict = load_state_dict(state_dict_path)
@@ -736,7 +838,7 @@ class QwenVLBase:
             else:
                 print(f"[QwenVL] Loading {model_name} ({quant.value}, attn={actual_attn_impl})")
             
-            self.model = AutoModelForVision2Seq.from_pretrained(model_path, **load_kwargs).eval()
+            self.model = AutoModelForVision2Seq.from_pretrained(model_path_str, **load_kwargs).eval()
         
         # Apply SageAttention patching if selected
         if attn_impl == "sage":
@@ -755,8 +857,11 @@ class QwenVLBase:
                 print("[QwenVL] torch.compile enabled")
             except Exception as exc:
                 print(f"[QwenVL] torch.compile skipped: {exc}")
-        self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        if lora_file is not None:
+            self.model = self._apply_hf_lora(self.model, lora_file, lora_scale)
+
+        self.processor = AutoProcessor.from_pretrained(model_path_str, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path_str, trust_remote_code=True)
         self.current_signature = signature
 
     @staticmethod
@@ -776,26 +881,50 @@ class QwenVLBase:
         num_beams,
         repetition_penalty,
         video_frame_size="auto",
+        system_prompt=None,
+        user_content=None,
     ):
-        conversation = [{"role": "user", "content": []}]
-        if image is not None:
-            conversation[0]["content"].append({"type": "image", "image": tensor_to_pil(image, max_side=1280)})
-        if video is not None:
-            video_max_side = resolve_safe_video_max_side(
-                video,
-                frame_count=int(frame_count),
-                ctx=8192,
-                video_frame_size=video_frame_size,
-            )
-            frames = sample_video_frames(video, int(frame_count))
-            pil_frames = [tensor_to_pil(frame, max_side=video_max_side) for frame in frames]
-            pil_frames = [f for f in pil_frames if f is not None]
-            if pil_frames:
-                conversation[0]["content"].append({"type": "video", "video": pil_frames})
-        conversation[0]["content"].append({"type": "text", "text": prompt_text})
+        conversation = []
+        if system_prompt:
+            conversation.append({"role": "system", "content": system_prompt})
+        conversation.append({"role": "user", "content": []})
+        if user_content is not None:
+            # Unified content parts (from the FL2VA / Ref2VA preset builders):
+            # {"type": "text"} or {"type": "image_url"} with a base64 data URL.
+            for part in user_content:
+                if part.get("type") == "text":
+                    conversation[-1]["content"].append({"type": "text", "text": part.get("text", "")})
+                elif part.get("type") == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    payload = url.split(",", 1)[1] if "," in url else ""
+                    if not payload:
+                        continue
+                    try:
+                        pil_img = Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
+                    except Exception as exc:
+                        print(f"[QwenVL] Skipping undecodable reference image: {exc}")
+                        continue
+                    conversation[-1]["content"].append({"type": "image", "image": pil_img})
+        else:
+            if image is not None:
+                conversation[-1]["content"].append({"type": "image", "image": tensor_to_pil(image, max_side=1280)})
+            if video is not None:
+                video_max_side = resolve_safe_video_max_side(
+                    video,
+                    frame_count=int(frame_count),
+                    ctx=8192,
+                    video_frame_size=video_frame_size,
+                )
+                frames = sample_video_frames(video, int(frame_count))
+                pil_frames = [tensor_to_pil(frame, max_side=video_max_side) for frame in frames]
+                pil_frames = [f for f in pil_frames if f is not None]
+                if pil_frames:
+                    conversation[-1]["content"].append({"type": "video", "video": pil_frames})
+        conversation[-1]["content"].append({"type": "text", "text": prompt_text})
         chat = self.processor.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
-        images = [item["image"] for item in conversation[0]["content"] if item["type"] == "image"]
-        video_frames = [frame for item in conversation[0]["content"] if item["type"] == "video" for frame in item["video"]]
+        user_parts = conversation[-1]["content"]
+        images = [item["image"] for item in user_parts if item["type"] == "image"]
+        video_frames = [frame for item in user_parts if item["type"] == "video" for frame in item["video"]]
         videos = [video_frames] if video_frames else None
         processed = self.processor(text=chat, images=images or None, videos=videos, return_tensors="pt")
         model_device = next(self.model.parameters()).device
@@ -824,17 +953,87 @@ class QwenVLBase:
         text = self.tokenizer.decode(outputs[0, input_len:], skip_special_tokens=True)
         return text.strip()
 
-    def run(self, model_name, quantization, preset_prompt, custom_prompt, image, video, frame_count, max_tokens, temperature, top_p, num_beams, repetition_penalty, seed, keep_model_loaded, attention_mode, use_torch_compile, device, video_frame_size="auto"):
+    def run(self, model_name, quantization, preset_prompt, custom_prompt, image, video, frame_count, max_tokens, temperature, top_p, num_beams, repetition_penalty, seed, keep_model_loaded, attention_mode, use_torch_compile, device, video_frame_size="auto", model_path=None, duration=8.0):
         # Create progress bar with 3 stages: setup, model loading, generation
         pbar = ProgressBar(3)
-        
+
         torch.manual_seed(seed)
-        prompt = SYSTEM_PROMPTS.get(preset_prompt, preset_prompt)
-        if custom_prompt and custom_prompt.strip():
-            prompt = custom_prompt.strip()
-        
+
+        # Unified preset pipeline (shared with the GGUF nodes).
+        is_fl2va = preset_prompt == FL2VA_PRESET
+        is_ref2va = preset_prompt == REF2VA_PRESET
+        user_content = None
+        images_b64: list[str] = []
+
+        if is_fl2va or is_ref2va:
+            try:
+                video_duration = float(duration)
+            except Exception:
+                video_duration = 8.0
+            if not (isinstance(video_duration, (int, float)) and video_duration > 0):
+                video_duration = 8.0
+
+            min_max_tokens = max(FL2VA_MIN_MAX_TOKENS, REF2VA_MIN_MAX_TOKENS)
+            if int(max_tokens) < min_max_tokens:
+                print(f"[QwenVL] Prompt Enhance preset: raising max_tokens to {min_max_tokens}.")
+                max_tokens = min_max_tokens
+
+            if is_fl2va:
+                for frame in select_fl2va_frames(image, video):
+                    img = tensor_to_base64_png(frame, max_side=1280)
+                    if img:
+                        images_b64.append(img)
+                if len(images_b64) < 2:
+                    print(
+                        "[QwenVL] FL2VA preset expects two frames (first + last); "
+                        f"got {len(images_b64)}. Falling back to "
+                        f"{'I2VA' if images_b64 else 'T2VA'} instructions."
+                    )
+                task_type, prompt, user_content = build_fl2va_request(images_b64, video_duration, custom_prompt)
+                system_prompt = load_fl2va_system_prompt()
+                print(
+                    f"[QwenVL] FL2VA preset active: task={task_type}, "
+                    f"duration={video_duration:g}s, frames={len(images_b64)}."
+                )
+            else:
+                frames = iter_batch_frames(image)
+                if not frames and video is not None:
+                    frames = sample_video_frames(video, int(frame_count))
+                    print("[QwenVL] Ref2VA preset: using video frames as reference pictures.")
+                elif image is not None and video is not None:
+                    print("[QwenVL] Ref2VA preset: using the image input; video input is ignored in this mode.")
+                if len(frames) > REF2VA_MAX_IMAGES:
+                    print(
+                        f"[QwenVL] Ref2VA preset: using the first {REF2VA_MAX_IMAGES} "
+                        f"of {len(frames)} reference frames."
+                    )
+                    frames = frames[:REF2VA_MAX_IMAGES]
+                for frame in frames:
+                    img = tensor_to_base64_png(frame, max_side=1024)
+                    if img:
+                        images_b64.append(img)
+                if not images_b64:
+                    raise ValueError(
+                        "[QwenVL] Ref2VA preset requires at least one reference image. "
+                        "Connect an IMAGE batch (or a video) to the node."
+                    )
+                prompt, user_content = build_ref2va_request(images_b64, video_duration, custom_prompt)
+                system_prompt = load_ref2va_system_prompt()
+                print(
+                    f"[QwenVL] Ref2VA preset active: duration={video_duration:g}s, "
+                    f"references={len(images_b64)}."
+                )
+        else:
+            prompt = resolve_preset_text(preset_prompt)
+            if custom_prompt and custom_prompt.strip():
+                prompt = custom_prompt.strip()
+            system_prompt = (
+                "You are a helpful vision-language assistant. "
+                "Answer directly with the final answer only. No <think> and no reasoning."
+            )
+
         pbar.update_absolute(1, 3, None)
-        
+
         self.load_model(
             model_name,
             quantization,
@@ -842,10 +1041,11 @@ class QwenVLBase:
             use_torch_compile,
             device,
             keep_model_loaded,
+            model_path=model_path,
         )
-        
+
         pbar.update_absolute(2, 3, None)
-        
+
         try:
             text = self.generate(
                 prompt,
@@ -858,10 +1058,12 @@ class QwenVLBase:
                 num_beams,
                 repetition_penalty,
                 video_frame_size=video_frame_size,
+                system_prompt=system_prompt,
+                user_content=user_content,
             )
-            
+
             pbar.update_absolute(3, 3, None)
-            
+
             return (text,)
         finally:
             if not keep_model_loaded:
@@ -877,23 +1079,29 @@ class AILab_QwenVL(QwenVLBase):
         load_model_configs()
         models = list(HF_VL_MODELS.keys())
         default_model = models[0] if models else "Qwen3-VL-4B-Instruct"
-        prompts = PRESET_PROMPTS or ["Describe this image in detail."]
+        prompts = unified_preset_prompts()
         preferred_prompt = "🖼️ Detailed Description"
         default_prompt = preferred_prompt if preferred_prompt in prompts else prompts[0]
         return {
             "required": {
-                "model_name": (models, {"default": default_model, "tooltip": TOOLTIPS["model_name"]}),
+                "model_name": (models, {"default": default_model, "tooltip": "Ignored when model_path is connected. " + TOOLTIPS["model_name"]}),
                 "quantization": (Quantization.get_values(), {"default": Quantization.FP16.value, "tooltip": TOOLTIPS["quantization"]}),
                 "attention_mode": (ATTENTION_MODES, {"default": "auto", "tooltip": TOOLTIPS["attention_mode"]}),
                 "preset_prompt": (prompts, {"default": default_prompt, "tooltip": TOOLTIPS["preset_prompt"]}),
                 "custom_prompt": ("STRING", {"default": "", "multiline": True, "tooltip": TOOLTIPS["custom_prompt"]}),
-                "max_tokens": ("INT", {"default": 512, "min": 64, "max": 2048, "tooltip": TOOLTIPS["max_tokens"]}),
+                "max_tokens": ("INT", {"default": 512, "min": 64, "max": 8192, "tooltip": TOOLTIPS["max_tokens"]}),
                 "keep_model_loaded": ("BOOLEAN", {"default": True, "tooltip": TOOLTIPS["keep_model_loaded"]}),
-                "seed": ("INT", {"default": 1, "min": 1, "max": 2**32 - 1, "tooltip": TOOLTIPS["seed"]}),
+                # control_after_generate must be declared explicitly: the frontend
+                # adds a serialized control widget after every "seed" input, and
+                # without this flag its value-restore migration miscounts widget
+                # slots when the optional model_path forceInput is present.
+                "seed": ("INT", {"default": 1, "min": 1, "max": 2**32 - 1, "control_after_generate": True, "tooltip": TOOLTIPS["seed"]}),
             },
             "optional": {
                 "image": ("IMAGE",),
                 "video": ("IMAGE",),
+                "model_path": ("STRING", {"forceInput": True, "tooltip": TOOLTIPS["model_path"]}),
+                "duration (FL2VA-Ref2VA)": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 3600.0, "step": 0.1, "tooltip": TOOLTIPS["duration"]}),
             },
         }
 
@@ -902,8 +1110,9 @@ class AILab_QwenVL(QwenVLBase):
     FUNCTION = "process"
     CATEGORY = "🧪AILab/QwenVL"
 
-    def process(self, model_name, quantization, preset_prompt, custom_prompt, attention_mode, max_tokens, keep_model_loaded, seed, image=None, video=None):
-        return self.run(model_name, quantization, preset_prompt, custom_prompt, image, video, 16, max_tokens, 0.6, 0.9, 1, 1.2, seed, keep_model_loaded, attention_mode, False, "auto", video_frame_size="auto")
+    def process(self, model_name, quantization, preset_prompt, custom_prompt, attention_mode, max_tokens, keep_model_loaded, seed, image=None, video=None, model_path=None, **kwargs):
+        duration = get_duration_input(kwargs)
+        return self.run(model_name, quantization, preset_prompt, custom_prompt, image, video, 16, max_tokens, 0.6, 0.9, 1, 1.2, seed, keep_model_loaded, attention_mode, False, "auto", video_frame_size="auto", model_path=model_path, duration=duration)
 
 class AILab_QwenVL_Advanced(QwenVLBase):
     @classmethod
@@ -915,7 +1124,7 @@ class AILab_QwenVL_Advanced(QwenVLBase):
         load_model_configs()
         models = list(HF_VL_MODELS.keys())
         default_model = models[0] if models else "Qwen3-VL-4B-Instruct"
-        prompts = PRESET_PROMPTS or ["Describe this image in detail."]
+        prompts = unified_preset_prompts()
         preferred_prompt = "🖼️ Detailed Description"
         default_prompt = preferred_prompt if preferred_prompt in prompts else prompts[0]
 
@@ -925,14 +1134,14 @@ class AILab_QwenVL_Advanced(QwenVLBase):
 
         return {
             "required": {
-                "model_name": (models, {"default": default_model, "tooltip": TOOLTIPS["model_name"]}),
+                "model_name": (models, {"default": default_model, "tooltip": "Ignored when model_path is connected. " + TOOLTIPS["model_name"]}),
                 "quantization": (Quantization.get_values(), {"default": Quantization.FP16.value, "tooltip": TOOLTIPS["quantization"]}),
                 "attention_mode": (ATTENTION_MODES, {"default": "auto", "tooltip": TOOLTIPS["attention_mode"]}),
                 "use_torch_compile": ("BOOLEAN", {"default": False, "tooltip": TOOLTIPS["use_torch_compile"]}),
                 "device": (device_options, {"default": "auto", "tooltip": TOOLTIPS["device"]}),
                 "preset_prompt": (prompts, {"default": default_prompt, "tooltip": TOOLTIPS["preset_prompt"]}),
                 "custom_prompt": ("STRING", {"default": "", "multiline": True, "tooltip": TOOLTIPS["custom_prompt"]}),
-                "max_tokens": ("INT", {"default": 512, "min": 64, "max": 4096, "tooltip": TOOLTIPS["max_tokens"]}),
+                "max_tokens": ("INT", {"default": 512, "min": 64, "max": 16384, "tooltip": TOOLTIPS["max_tokens"]}),
                 "temperature": ("FLOAT", {"default": 0.6, "min": 0.1, "max": 1.0, "tooltip": TOOLTIPS["temperature"]}),
                 "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "tooltip": TOOLTIPS["top_p"]}),
                 "num_beams": ("INT", {"default": 1, "min": 1, "max": 8, "tooltip": TOOLTIPS["num_beams"]}),
@@ -940,11 +1149,16 @@ class AILab_QwenVL_Advanced(QwenVLBase):
                 "frame_count": ("INT", {"default": 16, "min": 1, "max": 64, "tooltip": TOOLTIPS["frame_count"]}),
                 "video_frame_size": (["auto", "384", "448", "512", "768", "original"], {"default": "auto", "tooltip": TOOLTIPS["video_frame_size"]}),
                 "keep_model_loaded": ("BOOLEAN", {"default": True, "tooltip": TOOLTIPS["keep_model_loaded"]}),
-                "seed": ("INT", {"default": 1, "min": 1, "max": 2**32 - 1, "tooltip": TOOLTIPS["seed"]}),
+                # Explicit flag keeps the extra control widget in the frontend's
+                # widget-value restore mapping; otherwise saved values shift by
+                # one slot when model_path's forceInput is present.
+                "seed": ("INT", {"default": 1, "min": 1, "max": 2**32 - 1, "control_after_generate": True, "tooltip": TOOLTIPS["seed"]}),
             },
             "optional": {
                 "image": ("IMAGE",),
                 "video": ("IMAGE",),
+                "model_path": ("STRING", {"forceInput": True, "tooltip": TOOLTIPS["model_path"]}),
+                "duration (FL2VA-Ref2VA)": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 3600.0, "step": 0.1, "tooltip": TOOLTIPS["duration"]}),
             },
         }
 
@@ -953,8 +1167,9 @@ class AILab_QwenVL_Advanced(QwenVLBase):
     FUNCTION = "process"
     CATEGORY = "🧪AILab/QwenVL"
 
-    def process(self, model_name, quantization, attention_mode, use_torch_compile, device, preset_prompt, custom_prompt, max_tokens, temperature, top_p, num_beams, repetition_penalty, frame_count, video_frame_size, keep_model_loaded, seed, image=None, video=None):
-        return self.run(model_name, quantization, preset_prompt, custom_prompt, image, video, frame_count, max_tokens, temperature, top_p, num_beams, repetition_penalty, seed, keep_model_loaded, attention_mode, use_torch_compile, device, video_frame_size=video_frame_size)
+    def process(self, model_name, quantization, attention_mode, use_torch_compile, device, preset_prompt, custom_prompt, max_tokens, temperature, top_p, num_beams, repetition_penalty, frame_count, video_frame_size, keep_model_loaded, seed, image=None, video=None, model_path=None, **kwargs):
+        duration = get_duration_input(kwargs)
+        return self.run(model_name, quantization, preset_prompt, custom_prompt, image, video, frame_count, max_tokens, temperature, top_p, num_beams, repetition_penalty, seed, keep_model_loaded, attention_mode, use_torch_compile, device, video_frame_size=video_frame_size, model_path=model_path, duration=duration)
 
 NODE_CLASS_MAPPINGS = {
     "AILab_QwenVL": AILab_QwenVL,

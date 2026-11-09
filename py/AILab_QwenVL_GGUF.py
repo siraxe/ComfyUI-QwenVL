@@ -9,10 +9,8 @@
 #
 # Source: https://github.com/1038lab/ComfyUI-QwenVL
 
-import base64
 import gc
 import hashlib
-import io
 import inspect
 import json
 import math
@@ -31,18 +29,38 @@ from PIL import Image
 import folder_paths
 import comfy.model_management as model_management
 from AILab_OutputCleaner import OutputCleanConfig, clean_model_output
-from AILab_QwenVL_Presets import load_user_presets
-
+from AILab_QwenVL_PromptKit import (
+    FL2VA_MIN_CTX,
+    FL2VA_MIN_MAX_TOKENS,
+    FL2VA_PRESET,
+    REF2VA_CTX_PER_IMAGE,
+    REF2VA_MAX_CTX,
+    REF2VA_MAX_IMAGES,
+    REF2VA_IMAGE_MAX_SIDE,
+    REF2VA_MIN_CTX,
+    REF2VA_MIN_MAX_TOKENS,
+    REF2VA_PRESET,
+    build_fl2va_request as _build_fl2va_request,
+    build_ref2va_request as _build_ref2va_request,
+    get_duration_input as _get_duration_input,
+    iter_batch_frames as _iter_batch_frames,
+    load_fl2va_system_prompt as _load_fl2va_system_prompt,
+    load_ref2va_system_prompt as _load_ref2va_system_prompt,
+    resolve_preset_text as _resolve_preset_text,
+    select_fl2va_frames as _select_fl2va_frames,
+    unified_preset_prompts,
+)
 from AILab_Utils import (
     PLUGIN_DIR,
     GGUF_CONFIG_PATH,
     CUSTOM_MODELS_PATH,
+    normalize_input_path as _normalize_input_path,
+    parse_model_path_payload as _parse_model_path_payload,
     safe_dirname,
     resolve_base_dir,
     find_local_gguf_file,
     model_name_to_filename_candidates,
     filter_kwargs_for_callable,
-    load_system_prompts,
     parse_gguf_repos,
     tensor_to_base64_png,
     sample_video_frames,
@@ -50,272 +68,6 @@ from AILab_Utils import (
 )
 from comfy.utils import ProgressBar
 
-_prompts = load_system_prompts()
-PRESET_PROMPTS = _prompts["preset_prompts"]
-SYSTEM_PROMPTS = _prompts["qwenvl_prompts"]
-
-FL2VA_PRESET = "🎬 Prompt Enhance FL2VA"
-FL2VA_GUIDE_PATH = PLUGIN_DIR / "AILab_FL2VA_Prompt_Guide.md"
-FL2VA_MIN_CTX = 16384
-FL2VA_MIN_MAX_TOKENS = 4096
-
-_FL2VA_SYSTEM_PREFIX = (
-    "You are a professional prompt enhancement engineer for video and audio generation, "
-    "with expertise in visual storytelling, shot planning, camera movement, and sound design. "
-    "Before enhancing the prompt, carefully interpret the user's intended scene, subjects, actions, and audiovisual requirements. "
-    "Preserve the core meaning, event sequence, and explicit constraints. "
-    "Add relevant visual and sound details that enrich the intended scene without changing its premise or introducing unrelated events. "
-    "Rewrite the user's prompt according to the following guide. "
-    "Write the entire enhanced prompt in English, regardless of the original prompt's language. "
-    "Apply only the specified task type and return only the final prompt.\n\n"
-)
-
-_FL2VA_TASKS = {
-    "T2VA": {"roles": (), "instruction": ""},
-    "I2VA": {
-        "roles": ("first",),
-        "instruction": (
-            "Inspect the attached <Picture 1>, which is the video's first frame, "
-            "and enhance the prompt following the guide's I2VA rules."
-        ),
-    },
-    "FL2VA": {
-        "roles": ("first", "last"),
-        "instruction": (
-            "Inspect the attached <Picture 1> (the video's first frame) and "
-            "<Picture 2> (the video's last frame), and enhance the prompt "
-            "following the guide's FL2VA rules."
-        ),
-    },
-}
-
-
-REF2VA_PRESET = "🎬 Prompt Enhance Ref2VA"
-REF2VA_GUIDE_PATH = PLUGIN_DIR / "AILab_Ref2VA_Prompt_Guide.md"
-REF2VA_MIN_CTX = 16384
-REF2VA_MAX_CTX = 32768
-REF2VA_CTX_PER_IMAGE = 2048
-REF2VA_MAX_IMAGES = 16
-REF2VA_IMAGE_MAX_SIDE = 1024
-REF2VA_MIN_MAX_TOKENS = 4096
-
-_REF2VA_SYSTEM_PREFIX = (
-    "You enhance prompts for reference-conditioned video and audio generation (Ref2VA). "
-    "Infer reference roles from the user's prompt and supplied media. "
-    "Preserve intent and explicit constraints while adding relevant visual and sound details. "
-    "Follow the guide below and return only its six sections in order, "
-    "with plain-text headers on separate lines and no Markdown fences.\n\n"
-)
-
-_REF2VA_LABEL_NAMES = {
-    "zh": {"Subject": "主体", "Picture": "图片", "Video": "视频", "Audio": "音频"},
-    "en": {"Subject": "subject ", "Picture": "image ", "Video": "video ", "Audio": "audio "},
-}
-
-
-def _gguf_preset_prompts() -> list[str]:
-    prompts = list(PRESET_PROMPTS or ["🖼️ Detailed Description"])
-    for preset in (FL2VA_PRESET, REF2VA_PRESET):
-        if preset not in prompts:
-            prompts.append(preset)
-    # User presets created via the "Edit prompt presets" dialog.
-    try:
-        for name in load_user_presets():
-            if name not in prompts:
-                prompts.append(name)
-    except Exception as exc:
-        print(f"[QwenVL] User preset lookup failed: {exc}")
-    return prompts
-
-
-def _resolve_preset_text(name: str) -> str:
-    """Resolve a preset widget value to its system prompt text.
-
-    Built-ins come from system_prompts.json; user presets from the user preset
-    file (read live so the editor dialog takes effect without a restart).
-    Anything else is treated as a literal prompt.
-    """
-    if name in SYSTEM_PROMPTS:
-        return SYSTEM_PROMPTS[name]
-    try:
-        user_presets = load_user_presets()
-    except Exception:
-        user_presets = {}
-    if name in user_presets:
-        return user_presets[name]
-    return name
-
-
-def _load_fl2va_system_prompt() -> str:
-    guide = ""
-    try:
-        guide = FL2VA_GUIDE_PATH.read_text(encoding="utf-8").strip()
-    except Exception as exc:
-        print(f"[QwenVL] FL2VA prompt guide load failed ({FL2VA_GUIDE_PATH}): {exc}")
-    if not guide:
-        guide = (
-            "Rewrite the prompt as a MiniMax-H3 audiovisual timeline using an "
-            "integrated_multimodal_description, overall_soundscape and non_diegetic_music."
-        )
-    return _FL2VA_SYSTEM_PREFIX + guide
-
-
-def _select_fl2va_frames(image, video):
-    """Pick the first and last reference frames from an IMAGE batch / video tensor."""
-    source = image if image is not None else video
-    if source is None:
-        return []
-    if not hasattr(source, "shape"):
-        return [source]
-    ndim = int(getattr(source, "ndim", 0))
-    if ndim == 4:
-        count = int(source.shape[0])
-        if count <= 0:
-            return []
-        if count == 1:
-            return [source[0]]
-        return [source[0], source[-1]]
-    if ndim == 3:
-        return [source]
-    return []
-
-
-def _build_fl2va_request(images_b64: list[str], duration: float, custom_prompt: str):
-    """Replicate MiniMax-H3-FL2VA request layout (system prefix + guide handled separately)."""
-    count = len(images_b64)
-    if count >= 2:
-        task_type = "FL2VA"
-    elif count == 1:
-        task_type = "I2VA"
-    else:
-        task_type = "T2VA"
-
-    task = _FL2VA_TASKS[task_type]
-    roles = task["roles"]
-    images_b64 = images_b64[: len(roles)]
-
-    original_prompt = (custom_prompt or "").strip()
-    if not original_prompt:
-        original_prompt = "Describe the motion and audiovisual content that connects the provided reference frames."
-        print("[QwenVL] FL2VA preset: custom_prompt is empty; using a generic original prompt.")
-
-    instruction = task["instruction"] + "\n" if roles else ""
-    duration_number = int(duration) if float(duration).is_integer() else float(duration)
-    header = (
-        f"Task type: {task_type}.\n"
-        f"Video duration: {duration_number} seconds.\n"
-        f"{instruction}"
-        "Choose shots that best express the original intent, using separate shots for distinct subjects, details, reactions, or meaningful changes in scene, viewpoint, or time.\n"
-        "Allocate shot durations according to content and pacing.\n"
-        "Respect explicit shot requests and follow the guide's task-specific, formatting, and transition rules.\n"
-        f"Original prompt: {original_prompt}\n"
-    )
-
-    user_prompt = header
-    content_parts = [{"type": "text", "text": header}]
-    for number, (role, image_b64) in enumerate(zip(roles, images_b64), 1):
-        timestamp = 0.0 if role == "first" else float(duration)
-        line = f"<Picture {number}>: the video's {role} frame at {timestamp:.2f} seconds.\n"
-        user_prompt += line
-        content_parts.append({"type": "text", "text": line})
-        content_parts.append(
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}}
-        )
-
-    return task_type, user_prompt, content_parts
-
-
-def _load_ref2va_system_prompt() -> str:
-    guide = ""
-    try:
-        guide = REF2VA_GUIDE_PATH.read_text(encoding="utf-8").strip()
-    except Exception as exc:
-        print(f"[QwenVL] Ref2VA prompt guide load failed ({REF2VA_GUIDE_PATH}): {exc}")
-    if not guide:
-        guide = (
-            "Rewrite the prompt as a MiniMax-H3 full-reference prompt with the six sections "
-            "subject_definitions, summary, retention_analysis, detailed_description, "
-            "overall_soundscape and non_diegetic_music."
-        )
-    return _REF2VA_SYSTEM_PREFIX + guide
-
-
-def _iter_batch_frames(source) -> list:
-    """Return every frame of an IMAGE batch as a list of single-frame tensors."""
-    if source is None:
-        return []
-    if not hasattr(source, "shape"):
-        return [source]
-    ndim = int(getattr(source, "ndim", 0))
-    if ndim == 4:
-        return [source[i] for i in range(int(source.shape[0]))]
-    if ndim == 3:
-        return [source]
-    return []
-
-
-def _build_ref2va_request(images_b64: list[str], duration: float, custom_prompt: str):
-    """Replicate MiniMax-H3-Ref2VA request layout (system prefix + guide handled separately)."""
-    count = len(images_b64)
-    original_prompt = (custom_prompt or "").strip()
-    if not original_prompt:
-        original_prompt = "Use the provided reference images to create the target video."
-        print("[QwenVL] Ref2VA preset: custom_prompt is empty; using a generic original prompt.")
-
-    original_prompt = re.sub(r"<Figure\s+(\d+)>", r"<Picture \1>", original_prompt)
-    used_pictures = {int(number) for number in re.findall(r"<Picture\s+(\d+)>", original_prompt)}
-    if used_pictures and max(used_pictures) > count:
-        raise ValueError(
-            f"[QwenVL] Ref2VA preset: prompt references <Picture {max(used_pictures)}> "
-            f"but only {count} reference image(s) are connected."
-        )
-    if re.search(r"<(?:Video|Audio)\s+\d+>", original_prompt):
-        print(
-            "[QwenVL] Ref2VA preset: <Video N>/<Audio N> labels are present, but this node "
-            "only supplies image references; those relationships may be approximated by the model."
-        )
-
-    names = _REF2VA_LABEL_NAMES["zh"] if re.search("[㐀-鿿]", original_prompt) else _REF2VA_LABEL_NAMES["en"]
-    original_prompt = re.sub(
-        r"<(Subject|Picture|Video|Audio)\s+(\d+)>",
-        lambda match: names[match[1]] + match[2],
-        original_prompt,
-    )
-
-    user_prompt = f"Target video duration: {float(duration):.6f} seconds.\n"
-    if count:
-        user_prompt += "Inspect the reference images labeled <Picture N> and use them according to the user's instructions.\n"
-    user_prompt += (
-        "Choose shots that best express the original intent. "
-        "Allocate shot durations and cut timing within the target duration according to content and pacing. "
-        "Respect explicit shot requests, reference constraints and the guide's transition rules.\n"
-        f"Original prompt:\n{original_prompt}\n"
-    )
-
-    content_parts = [{"type": "text", "text": user_prompt}]
-    for index, image_b64 in enumerate(images_b64, 1):
-        content_parts.append(
-            {"type": "text", "text": f"图片{index} / reference image {index}: <Picture {index}>.\n"}
-        )
-        content_parts.append(
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}}
-        )
-
-    return user_prompt, content_parts
-
-
-def _get_duration_input(kwargs: dict, default: float = 8.0) -> float:
-    """Read the duration widget, tolerating the key used by older node layouts."""
-    for key in ("duration (FL2VA-Ref2VA)", "duration (FL2VA)", "duration"):
-        if key in kwargs:
-            value = kwargs[key]
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                candidate = float(value)
-                if math.isfinite(candidate) and candidate > 0:
-                    return candidate
-            print(f"[QwenVL] Warning: invalid duration value {value!r}; using {default}.")
-            return float(default)
-    return float(default)
 
 
 def _sanitize_control_values(device, gpu_layers, duration):
@@ -401,9 +153,6 @@ def _load_gguf_vl_catalog():
 def reload_gguf_vl_catalog():
     global GGUF_VL_CATALOG
     GGUF_VL_CATALOG = _load_gguf_vl_catalog()
-
-
-GGUF_VL_CATALOG = _load_gguf_vl_catalog()
 
 
 GGUF_VL_CATALOG = _load_gguf_vl_catalog()
@@ -588,53 +337,6 @@ def _resolve_model_entry_for_path(model_path: Path) -> GGUFVLResolved:
         model_filename=str(model_path),
         mmproj_filename=None,
     )
-
-
-def _normalize_input_path(value) -> Path | None:
-    """Turn a user-provided path string into an absolute Path (or None)."""
-    if value is None:
-        return None
-    raw = str(value).strip().strip('"').strip("'")
-    if not raw:
-        return None
-
-    path = Path(raw).expanduser()
-    if path.is_absolute():
-        return path
-
-    # Relative paths are resolved against CWD first, then models/.
-    candidates = [Path.cwd() / path]
-    models_dir = getattr(folder_paths, "models_dir", None)
-    if models_dir:
-        candidates.append(Path(models_dir) / path)
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate.resolve()
-    return candidates[0].resolve()
-
-
-def _parse_model_path_payload(value) -> tuple[Path | None, Path | None, float]:
-    """Accept either a plain path or the dict emitted by QwenVL GGUF Path Loader.
-
-    Returns ``(model_path, lora_path, lora_scale)``. When the loader emitted
-    ``override_model=False``, the payload is ignored so the consuming node falls
-    back to its own ``model_name`` dropdown (and any LoRA attached to the loader
-    is NOT applied to that default model).
-    """
-    if value is None:
-        return None, None, 1.0
-    if isinstance(value, dict):
-        if not bool(value.get("override_model", True)):
-            return None, None, 1.0
-        model_value = value.get("model_path") or value.get("path")
-        use_lora = bool(value.get("use_lora", True))
-        lora_value = value.get("lora_path") if use_lora else None
-        try:
-            lora_scale = float(value.get("lora_scale", 1.0))
-        except (TypeError, ValueError):
-            lora_scale = 1.0
-        return _normalize_input_path(model_value), _normalize_input_path(lora_value), lora_scale
-    return _normalize_input_path(value), None, 1.0
 
 
 def _find_mmproj_alongside(model_path: Path) -> Path | None:
@@ -1247,6 +949,12 @@ class QwenVLGGUFBase:
         if custom_model is not None:
             # Explicit model path (e.g. a Qwen VL GGUF from models/text_encoders).
             # No catalog lookup or downloading is needed; mmproj is picked up next to it.
+            if custom_model.suffix.lower() != ".gguf":
+                raise ValueError(
+                    f"[QwenVL] The GGUF nodes require a .gguf model file; "
+                    f"'{custom_model.name}' is not a GGUF model. Connect this file to "
+                    "the QwenVL (transformers) nodes instead."
+                )
             if not custom_model.is_file():
                 raise FileNotFoundError(f"[QwenVL] Custom GGUF model path not found: {custom_model}")
 
@@ -1820,7 +1528,7 @@ class AILab_QwenVL_GGUF(QwenVLGGUFBase):
         model_keys = sorted(list(all_models.keys())) or ["(edit gguf_models.json)"]
         default_model = model_keys[0]
 
-        prompts = _gguf_preset_prompts()
+        prompts = unified_preset_prompts()
         preferred_prompt = "🖼️ Detailed Description"
         default_prompt = preferred_prompt if preferred_prompt in prompts else prompts[0]
 
@@ -1847,7 +1555,7 @@ class AILab_QwenVL_GGUF(QwenVLGGUFBase):
             "optional": {
                 "image": ("IMAGE",),
                 "video": ("IMAGE",),
-                "model_path": ("STRING", {"forceInput": True, "tooltip": "Connect MODEL_PATH from the QwenVL GGUF Path Loader (carries model + optional LoRA), or a plain GGUF path string. Overrides model_name unless the loader's override_model is False."}),
+                "model_path": ("STRING", {"forceInput": True, "tooltip": "Connect MODEL_PATH from the QwenVL Path Loader (carries model + optional LoRA), or a plain GGUF path string. Overrides model_name unless the loader's override_model is False."}),
                 "duration (FL2VA-Ref2VA)": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 3600.0, "step": 0.1, "tooltip": f"Target video duration in seconds. Used by '{FL2VA_PRESET}' for the last-frame timestamp and by '{REF2VA_PRESET}' to plan shot timing; ignored by other presets."}),
             },
         }
@@ -1911,7 +1619,7 @@ class AILab_QwenVL_GGUF_Advanced(QwenVLGGUFBase):
         model_keys = sorted(list(all_models.keys())) or ["(edit gguf_models.json)"]
         default_model = model_keys[0]
 
-        prompts = _gguf_preset_prompts()
+        prompts = unified_preset_prompts()
         preferred_prompt = "🖼️ Detailed Description"
         default_prompt = preferred_prompt if preferred_prompt in prompts else prompts[0]
 
@@ -1946,7 +1654,7 @@ class AILab_QwenVL_GGUF_Advanced(QwenVLGGUFBase):
             "optional": {
                 "image": ("IMAGE",),
                 "video": ("IMAGE",),
-                "model_path": ("STRING", {"forceInput": True, "tooltip": "Connect MODEL_PATH from the QwenVL GGUF Path Loader (carries model + optional LoRA), or a plain GGUF path string. Overrides model_name unless the loader's override_model is False."}),
+                "model_path": ("STRING", {"forceInput": True, "tooltip": "Connect MODEL_PATH from the QwenVL Path Loader (carries model + optional LoRA), or a plain GGUF path string. Overrides model_name unless the loader's override_model is False."}),
                 "duration (FL2VA-Ref2VA)": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 3600.0, "step": 0.1, "tooltip": f"Target video duration in seconds. Used by '{FL2VA_PRESET}' for the last-frame timestamp and by '{REF2VA_PRESET}' to plan shot timing; ignored by other presets."}),
             },
         }
@@ -2008,12 +1716,84 @@ class AILab_QwenVL_GGUF_Advanced(QwenVLGGUFBase):
         )
 
 
-class AILab_QwenVL_GGUF_PathLoader:
-    """Lightweight path picker for Qwen VL GGUFs stored in models/text_encoders.
+def _list_hf_model_entries() -> list[str]:
+    """List transformers-model entries for the Path Loader.
 
-    Unlike CLIPLoader nodes it does not load anything into memory. The single
-    MODEL_PATH output carries a dict with the model path, the LoRA toggle and
-    the resolved LoRA path (the mmproj is auto-detected next to the model).
+    Collects .safetensors weights and snapshot folders (dirs containing a
+    config.json) from models/LLM, models/text_encoders and models/clip.
+    Folder entries are reported with a trailing slash.
+    """
+    names: set[str] = set()
+    seen_roots: set[str] = set()
+    for folder_name in ("LLM", "text_encoders", "clip"):
+        try:
+            roots = folder_paths.get_folder_paths(folder_name)
+        except Exception:
+            continue
+        for root in roots:
+            root_key = os.path.normcase(os.path.abspath(root))
+            if root_key in seen_roots:
+                continue
+            seen_roots.add(root_key)
+
+            root_path = Path(root)
+            if not root_path.is_dir():
+                continue
+            try:
+                for file_path in root_path.rglob("*.safetensors"):
+                    if file_path.is_file():
+                        names.add(file_path.relative_to(root_path).as_posix())
+                for config_path in root_path.rglob("config.json"):
+                    entry_dir = config_path.parent
+                    rel = entry_dir.relative_to(root_path).as_posix()
+                    if rel and rel != ".":
+                        names.add(rel + "/")
+            except Exception:
+                continue
+
+    return sorted(names, key=str.lower)
+
+
+def _resolve_loader_model_path(filename: str) -> str | None:
+    """Resolve a Path Loader model_file entry to an absolute path.
+
+    GGUF entries are looked up in models/text_encoders (and models/clip);
+    safetensors files and snapshot folders in models/LLM, models/text_encoders
+    and models/clip. Entries ending in "/" refer to folders.
+    """
+    if not filename or filename.startswith("("):
+        return None
+
+    gguf_path = _resolve_text_encoder_gguf_path(filename)
+    if gguf_path:
+        return gguf_path
+
+    wants_dir = filename.endswith("/")
+    rel = filename.rstrip("/")
+    for folder_name in ("LLM", "text_encoders", "clip"):
+        try:
+            roots = folder_paths.get_folder_paths(folder_name)
+        except Exception:
+            continue
+        for root in roots:
+            candidate = Path(root) / rel
+            if wants_dir and candidate.is_dir():
+                return str(candidate.resolve())
+            if not wants_dir and candidate.is_file():
+                return str(candidate.resolve())
+    return None
+
+
+class AILab_QwenVL_GGUF_PathLoader:
+    """Lightweight path picker shared by every QwenVL node.
+
+    Lists GGUF vision models (models/text_encoders, models/clip) and
+    transformers models (.safetensors weights or snapshot folders in
+    models/LLM, models/text_encoders, models/clip). Unlike CLIPLoader nodes it
+    does not load anything into memory. The single MODEL_PATH output carries a
+    dict with the model path + format, the LoRA toggle and the resolved LoRA
+    path; each consuming node applies the model with its own backend (llama.cpp
+    or transformers) and handles LoRA conversion itself.
     """
 
     @classmethod
@@ -2023,7 +1803,8 @@ class AILab_QwenVL_GGUF_PathLoader:
     @classmethod
     def INPUT_TYPES(cls):
         gguf_files = _list_text_encoder_gguf_files()
-        options = gguf_files or ["(no .gguf found in models/text_encoders)"]
+        hf_files = _list_hf_model_entries()
+        options = gguf_files + hf_files or ["(no models found in models/text_encoders or models/LLM)"]
         lora_files = _list_lora_files()
         lora_options = lora_files or ["(no LoRA found in models/loras)"]
         return {
@@ -2036,7 +1817,10 @@ class AILab_QwenVL_GGUF_PathLoader:
                 }),
                 "model_file": (options, {
                     "default": options[0],
-                    "tooltip": "GGUF files discovered in models/text_encoders (and models/clip).",
+                    "tooltip": "GGUF files from models/text_encoders (and models/clip), plus .safetensors "
+                               "weights and model folders (with config.json) from models/LLM, "
+                               "models/text_encoders and models/clip. GGUF entries feed the GGUF nodes, "
+                               "safetensors/folder entries feed the transformers nodes.",
                 }),
                 "use_lora": ("BOOLEAN", {
                     "default": False,
@@ -2046,7 +1830,8 @@ class AILab_QwenVL_GGUF_PathLoader:
                 "lora_file": (lora_options, {
                     "default": lora_options[0],
                     "tooltip": "LoRA adapters discovered in models/loras (recursively). "
-                               ".safetensors adapters are auto-converted to GGUF on first use.",
+                               "GGUF nodes auto-convert .safetensors adapters to GGUF; transformers "
+                               "nodes apply them via PEFT (requires the adapter_config.json).",
                 }),
                 "lora_str": ("FLOAT", {
                     "default": 1.00,
@@ -2072,8 +1857,10 @@ class AILab_QwenVL_GGUF_PathLoader:
             print("[QwenVL] Path Loader: override_model=False, downstream nodes will use their own model_name")
             return ({
                 "model_path": "",
+                "model_format": "",
                 "use_lora": False,
                 "lora_path": "",
+                "lora_format": "",
                 "lora_scale": 1.0,
                 "override_model": False,
             },)
@@ -2081,13 +1868,22 @@ class AILab_QwenVL_GGUF_PathLoader:
         if model_file is None:
             raise FileNotFoundError("[QwenVL] Path Loader: no model_file selected")
 
-        model_path = _resolve_text_encoder_gguf_path(model_file)
-        if model_path is None:
+        model_path_str = _resolve_loader_model_path(model_file)
+        if model_path_str is None:
             raise FileNotFoundError(
-                f"[QwenVL] GGUF file not found in models/text_encoders: {model_file}"
+                f"[QwenVL] Model file not found in models/text_encoders, models/clip or models/LLM: {model_file}"
             )
 
+        model_path = Path(model_path_str)
+        if model_path.is_dir():
+            model_format = "hf_dir"
+        elif model_path.suffix.lower() == ".gguf":
+            model_format = "gguf"
+        else:
+            model_format = "safetensors"
+
         lora_path = ""
+        lora_format = ""
         try:
             lora_scale = max(0.0, float(lora_str))
         except (TypeError, ValueError):
@@ -2098,19 +1894,20 @@ class AILab_QwenVL_GGUF_PathLoader:
                 raise FileNotFoundError(
                     f"[QwenVL] LoRA file not found in models/loras: {lora_file}"
                 )
-            selected_path = Path(selected)
-            if selected_path.suffix.lower() == ".safetensors":
-                lora_path = str(_ensure_gguf_lora(selected_path, Path(model_path)))
-            else:
-                lora_path = selected
-            print(f"[QwenVL] Path Loader: {Path(model_path).name} + LoRA {Path(lora_path).name} (strength {lora_scale:g})")
+            lora_path = selected
+            lora_format = "gguf" if Path(selected).suffix.lower() == ".gguf" else "safetensors"
+            # No conversion here: GGUF nodes convert .safetensors adapters to
+            # GGUF themselves; transformers nodes apply them via PEFT.
+            print(f"[QwenVL] Path Loader: {model_path.name} + LoRA {Path(lora_path).name} (strength {lora_scale:g})")
         else:
-            print(f"[QwenVL] Path Loader: {Path(model_path).name}")
+            print(f"[QwenVL] Path Loader: {model_path.name} ({model_format})")
 
         payload = {
-            "model_path": model_path,
+            "model_path": str(model_path),
+            "model_format": model_format,
             "use_lora": bool(use_lora),
             "lora_path": lora_path,
+            "lora_format": lora_format,
             "lora_scale": lora_scale,
             "override_model": True,
         }
@@ -2126,5 +1923,5 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AILab_QwenVL_GGUF": "QwenVL (GGUF)",
     "AILab_QwenVL_GGUF_Advanced": "QwenVL Advanced (GGUF)",
-    "AILab_QwenVL_GGUF_PathLoader": "QwenVL GGUF Path Loader",
+    "AILab_QwenVL_GGUF_PathLoader": "QwenVL Path Loader",
 }
