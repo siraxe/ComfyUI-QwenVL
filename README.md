@@ -17,7 +17,7 @@
 
 **Models / LoRAs used in the workflow (HuggingFace)**:
 
-- GGUF model: any Qwen VL model works
+- GGUF model: any Qwen3.8 27B VL model works
 - Prompt-rewriter LoRAs: [siraxe/lightx2v_MiniMax-H3-Prompt-Rewriter_loras](https://huggingface.co/siraxe/lightx2v_MiniMax-H3-Prompt-Rewriter_loras)
 
 ```
