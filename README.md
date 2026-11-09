@@ -1,7 +1,14 @@
 # **QwenVL for ComfyUI**
 
-> [!NOTE]
-> **This is a fork of the original [ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-QwenVL) by 1038lab**, extended with additional features such as the Path Loader `override_model` toggle, LoRA strength (`lora_str`) control, unified prompt presets across backends, and MiniMax-H3 FL2VA/Ref2VA prompt-enhance presets on both the GGUF and Transformers nodes. All credit for the original project goes to its authors.
+<table>
+  <tr>
+    <td width="40%" valign="top">
+      <strong>📝 NOTE</strong><br><br>
+      <strong>This is a fork of the original <a href="https://github.com/1038lab/ComfyUI-QwenVL">ComfyUI-QwenVL</a> by 1038lab</strong>, extended with additional features such as the Path Loader <code>override_model</code> toggle, LoRA strength (<code>lora_str</code>) control, unified prompt presets across backends, and MiniMax-H3 FL2VA/Ref2VA prompt-enhance presets on both the GGUF and Transformers nodes. All credit for the original project goes to its authors.
+    </td>
+    <td width="60%" valign="top"><em>img</em></td>
+  </tr>
+</table>
 
 ### 📂 QwenVL Path Loader
 
