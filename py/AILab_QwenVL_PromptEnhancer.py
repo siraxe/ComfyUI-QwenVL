@@ -17,7 +17,10 @@ from AILab_QwenVL import (
     QwenVLBase,
     Quantization,
     TOOLTIPS,
+    _InterruptGeneration,
 )
+from transformers import StoppingCriteriaList
+import comfy.model_management as model_management
 
 from AILab_Utils import (
     load_system_prompts,
@@ -262,7 +265,12 @@ class AILab_QwenVL_PromptEnhancer(QwenVLBase):
             "top_p": top_p,
             "eos_token_id": self.text_tokenizer.eos_token_id,
             "pad_token_id": self.text_tokenizer.eos_token_id,
+            # StoppingCriteria that raises on Cancel so generation aborts
+            # mid-run instead of blocking until every token is decoded.
+            "stopping_criteria": StoppingCriteriaList([_InterruptGeneration()]),
         }
+        # Catch a Cancel pressed while the model was loading before decoding starts.
+        model_management.throw_exception_if_processing_interrupted()
         outputs = self.text_model.generate(**inputs, **kwargs)
         prompt_len = inputs["input_ids"].shape[1]
         result = self.text_tokenizer.decode(outputs[0][prompt_len:], skip_special_tokens=True).strip()

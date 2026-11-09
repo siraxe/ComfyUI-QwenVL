@@ -1,8 +1,8 @@
 {
   "id": "be1f362d-0012-4783-839f-7d4ae51fba71",
   "revision": 0,
-  "last_node_id": 77,
-  "last_link_id": 52,
+  "last_node_id": 87,
+  "last_link_id": 54,
   "nodes": [
     {
       "id": 49,
@@ -65,7 +65,7 @@
         440.599940917969
       ],
       "flags": {},
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [
         {
@@ -92,7 +92,7 @@
           "name": "RESPONSE",
           "type": "STRING",
           "links": [
-            52
+            54
           ]
         }
       ],
@@ -114,7 +114,7 @@
         "🎬 Prompt Enhance Ref2VA",
         "Goblin fighting police trying to catch him",
         512,
-        42,
+        49,
         "fixed",
         8
       ],
@@ -126,7 +126,7 @@
         "preset_prompt": "🎬 Prompt Enhance Ref2VA",
         "custom_prompt": "Goblin fighting police trying to catch him",
         "max_tokens": 512,
-        "seed": 42,
+        "seed": 49,
         "control_after_generate": "fixed",
         "duration (FL2VA-Ref2VA)": 8
       },
@@ -194,7 +194,7 @@
         86
       ],
       "flags": {},
-      "order": 4,
+      "order": 3,
       "mode": 0,
       "inputs": [
         {
@@ -295,7 +295,7 @@
         78
       ],
       "flags": {},
-      "order": 5,
+      "order": 4,
       "mode": 0,
       "inputs": [
         {
@@ -339,69 +339,36 @@
       }
     },
     {
-      "id": 67,
-      "type": "Note",
-      "pos": [
-        63.375709433044975,
-        1001.147431979666
-      ],
-      "size": [
-        291.97608862304696,
-        88
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "properties": {
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "version": "7.2.2",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "Enable for multi image prompt enhancement"
-      ],
-      "widgets_values_named": {
-        "text": "Enable for multi image prompt enhancement"
-      },
-      "color": "#432",
-      "bgcolor": "#653"
-    },
-    {
-      "id": 77,
+      "id": 87,
       "type": "Display Any (rgthree)",
       "pos": [
-        75.13849802380774,
+        87.8825718763468,
         1139.622903620291
       ],
       "size": [
-        210,
-        88
+        179.640234375,
+        76
       ],
       "flags": {},
-      "order": 7,
+      "order": 6,
       "mode": 0,
       "inputs": [
         {
           "dir": 3,
           "name": "source",
           "type": "*",
-          "link": 52
+          "link": 54
         }
       ],
       "outputs": [],
       "properties": {
         "cnr_id": "rgthree-comfy",
         "ver": "2c5342a8cb0eaecaabf61435a5f37dd594c510ba",
-        "Node name for S&R": "Display Any (rgthree)",
         "ue_properties": {
           "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.2.2"
-        }
+          "input_ue_unconnectable": {}
+        },
+        "Node name for S&R": "Display Any (rgthree)"
       },
       "widgets_values": [
         ""
@@ -461,10 +428,10 @@
       "IMAGE"
     ],
     [
-      52,
+      54,
       54,
       0,
-      77,
+      87,
       0,
       "STRING"
     ]

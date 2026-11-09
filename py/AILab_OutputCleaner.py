@@ -54,7 +54,12 @@ def clean_model_output(text: str, config: OutputCleanConfig | None = None) -> st
 
     if cfg.strip_think:
         cleaned = _THINK_BLOCK_RE.sub("", cleaned)
-        cleaned = _THINK_CLOSE_RE.sub("", cleaned)
+        # Dangling close (generation started inside an unclosed think block, so the
+        # opening <think> never made it into the output): everything before the
+        # last </think> is reasoning and must go, not just the tag itself.
+        close_matches = list(_THINK_CLOSE_RE.finditer(cleaned))
+        if close_matches:
+            cleaned = cleaned[close_matches[-1].end():].strip()
         if _THINK_OPEN_RE.search(cleaned):
             cleaned = _THINK_OPEN_RE.sub("", cleaned)
             parts = re.split(r"\n\s*\n", cleaned, maxsplit=1)

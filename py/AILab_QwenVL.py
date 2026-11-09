@@ -32,8 +32,10 @@ try:
 except ImportError:
     from transformers import AutoModelForVision2Seq
 from transformers import AutoProcessor, AutoTokenizer, BitsAndBytesConfig
+from transformers import StoppingCriteria, StoppingCriteriaList
 
 import folder_paths
+import comfy.model_management as model_management
 from comfy.utils import ProgressBar
 
 # SageAttention support
@@ -60,6 +62,7 @@ from AILab_Utils import (
     resolve_safe_video_max_side,
     resolve_hf_model_path,
 )
+from AILab_OutputCleaner import OutputCleanConfig, clean_model_output
 from AILab_QwenVL_PromptKit import (
     FL2VA_MIN_MAX_TOKENS,
     FL2VA_PRESET,
@@ -123,6 +126,30 @@ class Quantization(str, Enum):
         raise ValueError(f"Unsupported quantization: {value}")
 
 ATTENTION_MODES = ["auto", "sage", "flash_attention_2", "sdpa"]
+
+class _InterruptGeneration(StoppingCriteria):
+    """StoppingCriteria that aborts HF generate() when ComfyUI's Cancel is pressed.
+
+    HF `generate()` is a single blocking call; without this hook there is no way
+    to stop a long decoding run (the Cancel button only takes effect after the
+    last token). Raising ComfyUI's InterruptProcessingException from inside the
+    stopping callback unwinds generate() immediately, the same way the GGUF
+    nodes abort via their streaming loop.
+    """
+
+    _check_every = 1
+
+    def __init__(self):
+        super().__init__()
+        self._steps = 0
+        self._new_tokens = 0
+
+    def __call__(self, input_ids, scores, **kwargs) -> bool:
+        self._steps += 1
+        if self._steps % self._check_every == 0:
+            # Raises model_management.InterruptProcessingException on Cancel.
+            model_management.throw_exception_if_processing_interrupted()
+        return False
 
 def load_model_configs():
     global HF_VL_MODELS, HF_TEXT_MODELS, HF_ALL_MODELS, SYSTEM_PROMPTS, PRESET_PROMPTS
@@ -921,7 +948,17 @@ class QwenVLBase:
                 if pil_frames:
                     conversation[-1]["content"].append({"type": "video", "video": pil_frames})
         conversation[-1]["content"].append({"type": "text", "text": prompt_text})
-        chat = self.processor.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
+        # Hybrid-thinking models (Qwen3 / Qwen3.5 / unsloth) open a <think> block by
+        # default, which slows decoding and leaks reasoning into the answer. Close
+        # the thinking section up-front when the template supports the flag,
+        # mirroring the GGUF nodes' force_reasoning=False. Templates without the
+        # variable simply ignore the extra kwarg.
+        try:
+            chat = self.processor.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=True, enable_thinking=False
+            )
+        except Exception:
+            chat = self.processor.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
         user_parts = conversation[-1]["content"]
         images = [item["image"] for item in user_parts if item["type"] == "image"]
         video_frames = [frame for item in user_parts if item["type"] == "video" for frame in item["video"]]
@@ -941,17 +978,25 @@ class QwenVLBase:
             "num_beams": num_beams,
             "eos_token_id": stop_tokens,
             "pad_token_id": self.tokenizer.pad_token_id,
+            # StoppingCriteria that raises on Cancel so generation aborts
+            # mid-run instead of blocking until every token is decoded.
+            "stopping_criteria": StoppingCriteriaList([_InterruptGeneration()]),
         }
         if num_beams == 1:
             kwargs.update({"do_sample": True, "temperature": temperature, "top_p": top_p})
         else:
             kwargs["do_sample"] = False
+        # Catch a Cancel pressed while the model was loading before decoding starts.
+        model_management.throw_exception_if_processing_interrupted()
         outputs = self.model.generate(**model_inputs, **kwargs)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         input_len = model_inputs["input_ids"].shape[-1]
         text = self.tokenizer.decode(outputs[0, input_len:], skip_special_tokens=True)
-        return text.strip()
+        # Strip <think> blocks, dangling tags and chat-template tokens, so answers
+        # stay clean even if a model reasons despite the template flag.
+        cleaned = clean_model_output(str(text or ""), OutputCleanConfig(mode="text"))
+        return cleaned.strip()
 
     def run(self, model_name, quantization, preset_prompt, custom_prompt, image, video, frame_count, max_tokens, temperature, top_p, num_beams, repetition_penalty, seed, keep_model_loaded, attention_mode, use_torch_compile, device, video_frame_size="auto", model_path=None, duration=8.0):
         # Create progress bar with 3 stages: setup, model loading, generation

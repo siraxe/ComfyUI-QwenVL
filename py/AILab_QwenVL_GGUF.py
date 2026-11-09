@@ -59,6 +59,7 @@ from AILab_Utils import (
     safe_dirname,
     resolve_base_dir,
     find_local_gguf_file,
+    get_comfyui_llm_paths,
     model_name_to_filename_candidates,
     filter_kwargs_for_callable,
     parse_gguf_repos,
@@ -369,10 +370,10 @@ def _find_mmproj_alongside(model_path: Path) -> Path | None:
 
 
 def _list_text_encoder_gguf_files() -> list[str]:
-    """List non-mmproj GGUF files from models/text_encoders (and models/clip)."""
+    """List non-mmproj GGUF files from models/LLM, models/text_encoders and models/clip."""
     names: set[str] = set()
     seen_roots: set[str] = set()
-    for folder_name in ("text_encoders", "clip_gguf"):
+    for folder_name in ("LLM", "text_encoders", "clip_gguf"):
         try:
             roots = folder_paths.get_folder_paths(folder_name)
         except Exception:
@@ -411,6 +412,18 @@ def _resolve_text_encoder_gguf_path(filename: str) -> str | None:
             full_path = None
         if full_path and os.path.isfile(full_path):
             return os.path.abspath(full_path)
+    # Fallback: search models/LLM recursively (get_full_path doesn't cover
+    # arbitrary subfolders there the same way).
+    for base in get_comfyui_llm_paths():
+        if not base.exists():
+            continue
+        try:
+            matches = list(base.glob(f"**/{Path(filename).name}"))
+        except Exception:
+            continue
+        for m in matches:
+            if m.is_file() and m.suffix.lower() == ".gguf":
+                return str(m.resolve())
     return None
 
 
