@@ -1,8 +1,8 @@
 {
   "id": "be1f362d-0012-4783-839f-7d4ae51fba71",
   "revision": 0,
-  "last_node_id": 68,
-  "last_link_id": 49,
+  "last_node_id": 77,
+  "last_link_id": 52,
   "nodes": [
     {
       "id": 49,
@@ -92,7 +92,7 @@
           "name": "RESPONSE",
           "type": "STRING",
           "links": [
-            43
+            52
           ]
         }
       ],
@@ -111,8 +111,8 @@
         "auto",
         true,
         -1,
-        "🎬 Prompt Enhance FL2VA",
-        "Epic battle my the castle , dragon shows up",
+        "🎬 Prompt Enhance Ref2VA",
+        "Goblin fighting police trying to catch him",
         512,
         42,
         "fixed",
@@ -123,8 +123,8 @@
         "device": "auto",
         "keep_model_loaded": true,
         "gpu_layers": -1,
-        "preset_prompt": "🎬 Prompt Enhance FL2VA",
-        "custom_prompt": "Epic battle my the castle , dragon shows up",
+        "preset_prompt": "🎬 Prompt Enhance Ref2VA",
+        "custom_prompt": "Goblin fighting police trying to catch him",
         "max_tokens": 512,
         "seed": 42,
         "control_after_generate": "fixed",
@@ -171,74 +171,27 @@
         true,
         "Q3.8_27B-Q4/Qwen3.8-27B-Q4_K_M.gguf",
         true,
-        "H3_Q3.8_LLM/lightx2v_minimax_h3_FL2VA_PR-Q3.8-27B_rank64_bf16.safetensors",
+        "H3_Q3.8_LLM/lightx2v_minimax_h3_Ref2VA_PR-Q3.8-27B_rank64_bf16.safetensors",
         1
       ],
       "widgets_values_named": {
         "override_model": true,
         "model_file": "Q3.8_27B-Q4/Qwen3.8-27B-Q4_K_M.gguf",
         "use_lora": true,
-        "lora_file": "H3_Q3.8_LLM/lightx2v_minimax_h3_FL2VA_PR-Q3.8-27B_rank64_bf16.safetensors",
+        "lora_file": "H3_Q3.8_LLM/lightx2v_minimax_h3_Ref2VA_PR-Q3.8-27B_rank64_bf16.safetensors",
         "lora_str": 1
-      }
-    },
-    {
-      "id": 61,
-      "type": "PrimitiveString",
-      "pos": [
-        62.20882049673295,
-        1139.622903620291
-      ],
-      "size": [
-        270,
-        58
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "value",
-          "type": "STRING",
-          "widget": {
-            "name": "value"
-          },
-          "link": 43
-        }
-      ],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": null
-        }
-      ],
-      "properties": {
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {}
-        },
-        "cnr_id": "comfy-core",
-        "ver": "0.44.0",
-        "Node name for S&R": "PrimitiveString"
-      },
-      "widgets_values": [
-        ""
-      ],
-      "widgets_values_named": {
-        "value": ""
       }
     },
     {
       "id": 62,
       "type": "BatchImagesNode",
       "pos": [
-        -510.21237253320226,
-        913.8849292744953
+        -292.3544265755607,
+        876.4040050191242
       ],
       "size": [
-        140,
-        66
+        169.23046875,
+        86
       ],
       "flags": {},
       "order": 4,
@@ -272,21 +225,22 @@
         }
       ],
       "properties": {
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {}
-        },
         "cnr_id": "comfy-core",
         "ver": "0.44.0",
-        "Node name for S&R": "BatchImagesNode"
+        "Node name for S&R": "BatchImagesNode",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.2.2"
+        }
       }
     },
     {
       "id": 63,
       "type": "LoadImage",
       "pos": [
-        -653.2937175729713,
-        536.8722714758647
+        -656.807664806858,
+        643.4587481248058
       ],
       "size": [
         282.798828125,
@@ -311,21 +265,21 @@
         }
       ],
       "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.44.0",
+        "Node name for S&R": "LoadImage",
         "ue_properties": {
           "widget_ue_connectable": {},
           "input_ue_unconnectable": {},
           "version": "7.2.2"
-        },
-        "cnr_id": "comfy-core",
-        "ver": "0.44.0",
-        "Node name for S&R": "LoadImage"
+        }
       },
       "widgets_values": [
-        "main.png",
+        "overpass-cropped-2979697041.jpg",
         "image"
       ],
       "widgets_values_named": {
-        "image": "main.png",
+        "image": "overpass-cropped-2979697041.jpg",
         "upload": "image"
       }
     },
@@ -368,19 +322,20 @@
       ],
       "title": "USE MULTI (for FL2VA / Ref2VA)",
       "properties": {
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {}
-        },
         "cnr_id": "comfy-core",
         "ver": "0.44.0",
-        "Node name for S&R": "ComfySwitchNode"
+        "Node name for S&R": "ComfySwitchNode",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.2.2"
+        }
       },
       "widgets_values": [
-        false
+        true
       ],
       "widgets_values_named": {
-        "switch": false
+        "switch": true
       }
     },
     {
@@ -399,7 +354,13 @@
       "mode": 0,
       "inputs": [],
       "outputs": [],
-      "properties": {},
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.2.2",
+          "input_ue_unconnectable": {}
+        }
+      },
       "widgets_values": [
         "Enable for multi image prompt enhancement"
       ],
@@ -408,6 +369,46 @@
       },
       "color": "#432",
       "bgcolor": "#653"
+    },
+    {
+      "id": 77,
+      "type": "Display Any (rgthree)",
+      "pos": [
+        75.13849802380774,
+        1139.622903620291
+      ],
+      "size": [
+        210,
+        88
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "dir": 3,
+          "name": "source",
+          "type": "*",
+          "link": 52
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "rgthree-comfy",
+        "ver": "2c5342a8cb0eaecaabf61435a5f37dd594c510ba",
+        "Node name for S&R": "Display Any (rgthree)",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.2.2"
+        }
+      },
+      "widgets_values": [
+        ""
+      ],
+      "widgets_values_named": {
+        "output": ""
+      }
     }
   ],
   "links": [
@@ -418,30 +419,6 @@
       54,
       2,
       "STRING"
-    ],
-    [
-      43,
-      54,
-      0,
-      61,
-      0,
-      "STRING"
-    ],
-    [
-      44,
-      63,
-      0,
-      62,
-      0,
-      "IMAGE"
-    ],
-    [
-      45,
-      49,
-      0,
-      62,
-      1,
-      "IMAGE"
     ],
     [
       47,
@@ -466,6 +443,30 @@
       54,
       0,
       "IMAGE"
+    ],
+    [
+      44,
+      63,
+      0,
+      62,
+      0,
+      "IMAGE"
+    ],
+    [
+      45,
+      49,
+      0,
+      62,
+      1,
+      "IMAGE"
+    ],
+    [
+      52,
+      54,
+      0,
+      77,
+      0,
+      "STRING"
     ]
   ],
   "groups": [],
