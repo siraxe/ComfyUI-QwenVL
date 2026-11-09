@@ -127,6 +127,23 @@ path\to\ComfyUI\python_embeded\python.exe -c "from llama_cpp.llama_chat_format i
 
 If this fails, you installed a wheel that does not include vision support (or installed into the wrong Python environment).
 
+### Verify GPU offload (CUDA wheel)
+
+First make sure the CUDA backend DLL was installed:
+
+```bat
+dir path\to\ComfyUI\python_embeded\Lib\site-packages\llama_cpp\lib\ggml-cuda.dll
+```
+
+> [!NOTE]
+> In `llama-cpp-python` 0.4+ the GPU backend is loaded **lazily** when `Llama()` is created. Calling `llama_supports_gpu_offload()` in a fresh Python process returns `False` even on a working CUDA build. To test it properly, load the backends first:
+>
+> ```bat
+> path\to\ComfyUI\python_embeded\python.exe -c "import ctypes; from pathlib import Path; from llama_cpp import llama_cpp as lc; from llama_cpp._ggml import ggml_backend_load_all_from_path; lc.llama_backend_init(); ggml_backend_load_all_from_path(ctypes.c_char_p(str(Path(lc.__file__).resolve().parent / 'lib').encode())); print('GPU offload:', lc.llama_supports_gpu_offload())"
+> ```
+>
+> It should print `GPU offload: True`. The QwenVL nodes also log `[QwenVL] llama.cpp GPU offload active (n_gpu_layers=...)` after loading a model.
+
 ## 7) Fix common dependency conflicts (Windows)
 
 Some wheels may upgrade dependencies (notably `numpy` / `pillow`) and cause conflicts with other packages (like OpenCV).

@@ -19,6 +19,7 @@ import torch
 from huggingface_hub import hf_hub_download, snapshot_download
 
 import folder_paths
+import comfy.model_management as model_management
 from AILab_OutputCleaner import OutputCleanConfig, clean_model_output
 
 from AILab_Utils import (
@@ -293,7 +294,8 @@ class AILab_QwenVL_GGUF_PromptEnhancer:
             )
 
         def _call(system: str, user: str, temp: float, seed_val: int) -> str:
-            response = self.llm.create_chat_completion(
+            # Stream so ComfyUI's Cancel button can stop generation mid-run.
+            stream = self.llm.create_chat_completion(
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -303,7 +305,31 @@ class AILab_QwenVL_GGUF_PromptEnhancer:
                 top_p=top_p,
                 repeat_penalty=repetition_penalty,
                 seed=seed_val,
+                stream=True,
             )
+            if isinstance(stream, dict):
+                response = stream
+            else:
+                pieces: list[str] = []
+                try:
+                    for chunk in stream:
+                        model_management.throw_exception_if_processing_interrupted()
+                        choices = chunk.get("choices") or []
+                        if choices:
+                            piece = (choices[0].get("delta") or {}).get("content")
+                            if piece:
+                                pieces.append(piece)
+                except model_management.InterruptProcessingException:
+                    print("[QwenVL] Prompt enhancement interrupted.")
+                    raise
+                finally:
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            pass
+                response = {"choices": [{"message": {"content": "".join(pieces)}}]}
             if not response or "choices" not in response or not response["choices"]:
                 raise RuntimeError("[QwenVL] llama_cpp returned empty response")
             return (response["choices"][0].get("message", {}).get("content", "") or "").strip()

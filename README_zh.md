@@ -93,14 +93,20 @@ pip install sageattention
 ### **GGUF (llama.cpp) 节点**
 - **QwenVL (GGUF)**: GGUF 视觉语言推理。
 - **QwenVL (GGUF Advanced)**: 扩展 GGUF 控制（上下文、GPU 层等）。
+- **QwenVL GGUF Path Loader**: 从 `models/text_encoders` 选择 `.gguf`（同目录下的 `mmproj` 会自动识别）；启用 `use_lora` 后可从 `models/loras` 选择 `.gguf` 或 `.safetensors` 适配器，`.safetensors` 会在首次使用时自动转换为 GGUF（保存在源文件旁或插件缓存目录）。单一 `MODEL_PATH` 输出携带模型路径、`use_lora` 开关和解析后的 LoRA 路径（不会加载到内存）。
 - **QwenVL Prompt Enhancer (GGUF)**: GGUF 纯文本提示词增强。
 
 ## **🧩 GGUF 节点（llama.cpp 后端）**
 
 本仓库包含由 `llama-cpp-python` 驱动的 **GGUF** 节点（与基于 Transformers 的节点分开）。
 
-- **节点**: `QwenVL (GGUF)`、`QwenVL (GGUF Advanced)`、`QwenVL Prompt Enhancer (GGUF)`
+- **节点**: `QwenVL (GGUF)`、`QwenVL (GGUF Advanced)`、`QwenVL GGUF Path Loader`、`QwenVL Prompt Enhancer (GGUF)`
 - **模型文件夹**（默认）: `ComfyUI/models/llm/GGUF/`（可通过 `gguf_models.json` 配置）
+- **自定义模型路径**: 将 **QwenVL GGUF Path Loader** 的 `MODEL_PATH` 连接到 QwenVL GGUF 节点的可选 `model_path` 输入（也可使用任意字符串节点）。节点会直接加载该文件，并自动识别同目录下的 `mmproj-model-bf16.gguf`（或任意 `*mmproj*.gguf`）。这样无需编辑 `gguf_models.json` 即可使用存放在 `models/text_encoders` 中的任意自定义 Qwen VL GGUF。
+- **LoRA**: 在 **QwenVL GGUF Path Loader** 中启用 `use_lora`，从 `models/loras` 选择适配器，然后将 `MODEL_PATH` 连接到 QwenVL GGUF 节点的 `model_path` 输入。适配器通过 llama.cpp 原生 LoRA 支持应用。支持语言模型 LoRA（注意力/MLP，包括 Qwen3.5 线性注意力层）；不支持视觉塔 LoRA。若 `.safetensors` 旁没有 `adapter_config.json`，`lora_alpha` 默认取适配器 rank（scale 1.0）。
+- **取消运行**: GGUF 生成改为流式输出，并在每个 token 之间检查 ComfyUI 的中断标志，因此点击 **Cancel** 后约一个 token 内即可停止生成。模型加载和多模态提示词预处理阶段无法中断，必须先完成（llama.cpp 未在该阶段提供中断点）。
+- **Prompt Enhance FL2VA 预设**: 在 `preset_prompt` 中选择 `🎬 Prompt Enhance FL2VA`，并在 `custom_prompt` 中填写原始创意。节点会加载 MiniMax-H3 提示词写作指南（`AILab_FL2VA_Prompt_Guide.md`），将连接的 `image` 批次（或 `video`）的**首帧和尾帧**分别作为 `<Picture 1>` / `<Picture 2>`，把原始创意改写为 `integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music` 格式。使用 `duration (FL2VA-Ref2VA)` 控件设置视频时长（默认 8 秒）。只有一帧时自动回退到 I2VA 规则，没有帧时回退到 T2VA。启用该预设时，`ctx` 至少提升到 16384，`max_tokens` 至少提升到 4096，以容纳指南和两帧参考图。
+- **Prompt Enhance Ref2VA 预设**: 在 `preset_prompt` 中选择 `🎬 Prompt Enhance Ref2VA`，并在 `custom_prompt` 中描述目标视频，可用 `<Picture N>` / `<Subject N>` 引用素材（也支持 `<Figure N>` 别名）。节点会加载 MiniMax-H3 参考条件写作指南（`AILab_Ref2VA_Prompt_Guide.md`），把 `image` 批次的**每一帧按顺序作为参考图片**（`<Picture 1>`、`<Picture 2>`……最多 16 张）。若未连接图片，则改用从 `video` 输入采样的帧。输出遵循 Ref2VA 的六个段落：`subject_definitions`、`summary`、`retention_analysis`、`detailed_description`、`overall_soundscape`、`non_diegetic_music`。`custom_prompt` 中的引用标签会按提示词语言本地化为中文或英文。`ctx` 随参考数量增加（基础 16384，超过两张后每张 +2048，上限 32768），`max_tokens` 至少提升到 4096。本节点仅提供图片参考，不会上传视频/音频参考标签对应的素材。
 - **视觉要求**: 安装支持视觉的 `llama-cpp-python` wheel，提供 `Qwen3VLChatHandler` / `Qwen25VLChatHandler`
   参见 [docs/LLAMA_CPP_PYTHON_VISION_INSTALL.md](docs/LLAMA_CPP_PYTHON_VISION_INSTALL.md)
 

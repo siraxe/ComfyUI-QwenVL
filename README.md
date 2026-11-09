@@ -1,5 +1,8 @@
 # **QwenVL for ComfyUI**
 
+> [!NOTE]
+> **This is a fork of the original [ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-QwenVL) by 1038lab**, extended with additional features such as the GGUF Path Loader `override_model` toggle and LoRA strength (`lora_str`) control. All credit for the original project goes to its authors.
+
 The ComfyUI-QwenVL suite brings Alibaba Cloud’s next-generation vision-language and reasoning models into ComfyUI. Featuring native support for the full Qwen3-VL family (2B to 32B, Instruct & Thinking variants), Qwen3.5-VL, Qwen3.6-VL (MoE), Qwen3.8-VL, and Qwen2.5-VL, alongside text-only Qwen3 prompt enhancers. Powered by a high-performance dual-engine architecture (GGUF via llama.cpp & PyTorch via Transformers + SageAttention), it delivers ultra-fast image perception, long-sequence video analysis with intelligent token-budget auto-scaling, and zero-config custom model expansion.
 
 ![QwenVL_V1.1.0](https://github.com/user-attachments/assets/13e89746-a04e-41a3-9026-7079b29e149c)
@@ -99,14 +102,20 @@ pip install sageattention
 ### **GGUF (llama.cpp) Nodes**
 - **QwenVL (GGUF)**: GGUF vision-language inference.  
 - **QwenVL (GGUF Advanced)**: Extended GGUF controls (context, GPU layers, etc.).  
+- **QwenVL GGUF Path Loader**: Picks a `.gguf` from `models/text_encoders` (the matching `mmproj` is auto-detected next to it). Enable `use_lora` to pick a `.gguf` or `.safetensors` adapter from `models/loras`; `.safetensors` adapters are auto-converted to GGUF next to the source file (or in the plugin cache) on first use. The single `MODEL_PATH` output carries a dict with the model path, the `use_lora` flag and the resolved LoRA path. Nothing is loaded into memory.  
 - **QwenVL Prompt Enhancer (GGUF)**: GGUF text-only prompt enhancement.  
 
 ## **🧩 GGUF Nodes (llama.cpp backend)**
 
 This repo includes **GGUF** nodes powered by `llama-cpp-python` (separate from the Transformers-based nodes).
 
-- **Nodes**: `QwenVL (GGUF)`, `QwenVL (GGUF Advanced)`, `QwenVL Prompt Enhancer (GGUF)`
+- **Nodes**: `QwenVL (GGUF)`, `QwenVL (GGUF Advanced)`, `QwenVL GGUF Path Loader`, `QwenVL Prompt Enhancer (GGUF)`
 - **Model folder** (default): `ComfyUI/models/llm/GGUF/` (configurable via `gguf_models.json`)
+- **Custom model path**: connect `MODEL_PATH` from **QwenVL GGUF Path Loader** (or any string node) to the optional `model_path` input on the QwenVL GGUF nodes. The node then loads that file directly, and auto-detects `mmproj-model-bf16.gguf` (or any `*mmproj*.gguf`) in the same folder. This lets you use any custom Qwen VL GGUF stored in `models/text_encoders` without editing `gguf_models.json`.
+- **LoRA**: enable `use_lora` in **QwenVL GGUF Path Loader**, pick an adapter from `models/loras`, then connect `MODEL_PATH` to the `model_path` input on the QwenVL GGUF node. The adapter is applied through llama.cpp's native LoRA support. Language-model LoRAs (attention/MLP, including Qwen3.5 linear-attention layers) are supported; vision-tower LoRAs are not. If no `adapter_config.json` is found next to the `.safetensors`, `lora_alpha` defaults to the adapter rank (scale 1.0).
+- **Cancelling**: GGUF generation is streamed and checks ComfyUI's interrupt flag between tokens, so the **Cancel** button stops an active generation within about one token. Model loading and multimodal prompt prefill must finish first because llama.cpp does not expose an interruption point there.
+- **Prompt Enhance FL2VA preset**: select `🎬 Prompt Enhance FL2VA` in `preset_prompt` and put the original idea in `custom_prompt`. The node loads the MiniMax-H3 prompt-writing guide (`AILab_FL2VA_Prompt_Guide.md`), uses the **first and last frames** of the connected `image` batch (or `video`) as `<Picture 1>` / `<Picture 2>`, and rewrites the idea into an `integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music` prompt. Set the clip length with the `duration (FL2VA-Ref2VA)` widget (default 8 s). With only one frame it falls back to I2VA rules; with no frame it falls back to T2VA. While this preset is active, `ctx` is raised to at least 16384 and `max_tokens` to at least 4096 so the guide and two reference frames fit.
+- **Prompt Enhance Ref2VA preset**: select `🎬 Prompt Enhance Ref2VA` in `preset_prompt` and describe the target video in `custom_prompt`, referring to references as `<Picture N>` / `<Subject N>` (you may use `<Figure N>` as an alias). The node loads the MiniMax-H3 reference-conditioned guide (`AILab_Ref2VA_Prompt_Guide.md`) and uses **every frame of the `image` batch as an ordered reference picture** (`<Picture 1>`, `<Picture 2>`, …; up to 16). If no image is connected, frames sampled from the `video` input are used instead. The output follows the six-section Ref2VA layout: `subject_definitions`, `summary`, `retention_analysis`, `detailed_description`, `overall_soundscape`, `non_diegetic_music`. Reference labels in `custom_prompt` are localized to Chinese or English to match its language. `ctx` scales with the number of references (16384 base, +2048 per reference beyond two, capped at 32768) and `max_tokens` is raised to at least 4096. Only image references are supplied by this node; video/audio reference labels are not uploaded.
 - **Vision requirement**: install a vision-capable `llama-cpp-python` wheel that provides `Qwen3VLChatHandler` / `Qwen25VLChatHandler`  
   See [docs/LLAMA_CPP_PYTHON_VISION_INSTALL.md](docs/LLAMA_CPP_PYTHON_VISION_INSTALL.md)
 
