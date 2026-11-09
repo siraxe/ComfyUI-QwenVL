@@ -3,6 +3,28 @@
 > [!NOTE]
 > **This is a fork of the original [ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-QwenVL) by 1038lab**, extended with additional features such as the GGUF Path Loader `override_model` toggle and LoRA strength (`lora_str`) control. All credit for the original project goes to its authors.
 
+### 📂 QwenVL GGUF Path Loader
+
+**Example workflow**: [`example_workflows/Q3.8_27B_H3_promt_enhance.json`](example_workflows/Q3.8_27B_H3_promt_enhance.json)
+
+The **QwenVL GGUF Path Loader** lets you use any local GGUF vision model without touching `custom_models.json`:
+
+1. Place the GGUF model inside `ComfyUI/models/text_encoders/` — **each model in its own folder** (subfolders are scanned recursively). The `mmproj` visual projector must sit **next to the model file in the same folder**.
+2. Pick the model in the loader's `model_file` dropdown (`mmproj` files are hidden from the list automatically).
+3. Optional: enable `use_lora` and pick a LoRA from `models/loras` (`.safetensors` adapters are auto-converted to GGUF on first use), and set its strength with `lora_str`.
+4. Connect `MODEL_PATH` to any QwenVL (GGUF) node. Set `override_model` to `False` to temporarily ignore the loader and use the node's own `model_name` dropdown instead.
+
+Example layout (the model file may also be split into `-00001-of-...` shards, and any `*.gguf` file with `mmproj` in its name is detected as projector — `mmproj-model.gguf` works too, though the loader prefers `mmproj-model-bf16.gguf` when present):
+
+```
+ComfyUI/
+└─ models/
+   └─ text_encoders/
+      └─ Q3.8_27B-Q4/
+         ├─ Q3.8_27B-Q4.gguf
+         └─ mmproj-model-bf16.gguf   <-- required for image/video input
+```
+
 The ComfyUI-QwenVL suite brings Alibaba Cloud’s next-generation vision-language and reasoning models into ComfyUI. Featuring native support for the full Qwen3-VL family (2B to 32B, Instruct & Thinking variants), Qwen3.5-VL, Qwen3.6-VL (MoE), Qwen3.8-VL, and Qwen2.5-VL, alongside text-only Qwen3 prompt enhancers. Powered by a high-performance dual-engine architecture (GGUF via llama.cpp & PyTorch via Transformers + SageAttention), it delivers ultra-fast image perception, long-sequence video analysis with intelligent token-budget auto-scaling, and zero-config custom model expansion.
 
 ![QwenVL_V1.1.0](https://github.com/user-attachments/assets/13e89746-a04e-41a3-9026-7079b29e149c)
